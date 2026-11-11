@@ -3,9 +3,12 @@ from typing import Annotated
 from app.schema.doctor import Doctor, DoctorUpdate
 from app.models.doctor import Doctor as DoctorDB
 from app.dependencies import SessionDep
+from app.core.database import create_db_and_tables
 from sqlmodel import select
+from openai import OpenAI
 
 app = FastAPI()
+create_db_and_tables()
 
 
 @app.post('/create', status_code=status.HTTP_201_CREATED)
@@ -86,3 +89,63 @@ async def update_doctor(
     session.refresh(doctor_from_db)
 
     return doctor_from_db
+
+
+
+@app.post('/ask_ai')
+async def ask_ai(
+    text: Annotated[str, Body()],
+    session: SessionDep
+):
+
+    doctors = session.exec(select(DoctorDB)).all()
+
+    info_text = ""
+
+
+    for doctor in doctors:
+        info_text += f"{doctor.name}:{doctor.description}"
+
+    client = OpenAI(
+        # This is the default and can be omitted
+        api_key="" # fix
+    )
+
+    response = client.responses.create(
+        model="gpt-5.5",
+        instructions="به عنوان مشاور برای اینکه کدوم دکتر برای این بیمار بهتره کاربر رو راهنمایی کن لحن صمیمی و دوستانه داشته همیشه به فارسی جواب بده",
+        input=text + info_text,
+    )
+
+    return response.output_text
+
+
+@app.post('/doctors/{id:int}/reserve')
+async def reserve_doctor(
+    id: Annotated[int, Path()],
+    name: Annotated[str, Body()],
+    start: Annotated[str, Body()],
+    session: SessionDep
+):
+
+    doctor_from_db = session.get(DoctorDB, id)
+
+    if not doctor_from_db:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='دکتر وجود ندارد')
+
+
+    for slot in doctor_from_db.schlude:
+        if slot.start == start:
+            if slot.is_reserved:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail='این نوبت رزرو شده است')
+
+            slot.is_reserved = True
+            slot.reserved_by = name
+            
+            doctor_from_db.schlude = list(doctor_from_db.schlude)
+            session.add(doctor_from_db)
+            session.commit()
+            session.refresh(doctor_from_db)
+            return {'msg': 'successfully'}
+
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail='اصلا این تایم در تایم کاری دکتر موجود نیست!')
